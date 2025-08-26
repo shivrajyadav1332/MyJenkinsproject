@@ -1,1 +1,96 @@
-This is my branch file
+from flask import Flask, render_template, request, redirect, url_for, session, send_file
+import boto3
+import sqlite3
+import os
+from werkzeug.utils import secure_filename
+from io import BytesIO
+
+app = Flask(__name__)
+app.secret_key = "cloudproject"
+
+
+S3_BUCKET = "your-s3-bucket-name"
+S3_REGION = "ap-south-1"   # Example: Mumbai
+s3 = boto3.client("s3", region_name=S3_REGION)
+
+def init_db():
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT,
+        password TEXT
+    )""")
+    conn.commit()
+    conn.close()
+
+init_db()
+
+@app.route("/")
+def home():
+    if "user" in session:
+        return redirect(url_for("dashboard"))
+    return render_template("index.html")
+
+@app.route("/register", methods=["POST"])
+def register():
+    username = request.form["username"]
+    password = request.form["password"]
+
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+    conn.commit()
+    conn.close()
+    return redirect("/")
+
+@app.route("/login", methods=["POST"])
+def login():
+    username = request.form["username"]
+    password = request.form["password"]
+
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+    user = c.fetchone()
+    conn.close()
+
+    if user:
+        session["user"] = username
+        return redirect("/dashboard")
+    return "❌ Invalid Credentials"
+
+@app.route("/dashboard")
+def dashboard():
+    if "user" not in session:
+        return redirect("/")
+    return render_template("dashboard.html", user=session["user"])
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    if "file" not in request.files:
+        return "No file selected"
+    file = request.files["file"]
+    if file.filename == "":
+        return "No file name"
+    filename = secure_filename(file.filename)
+
+    # Upload to S3
+    s3.upload_fileobj(file, S3_BUCKET, filename)
+    return f" File {filename} uploaded to S3!"
+
+@app.route("/download/<filename>")
+def download(filename):
+    file_stream = BytesIO()
+    s3.download_fileobj(S3_BUCKET, filename, file_stream)
+    file_stream.seek(0)
+    return send_file(file_stream, as_attachment=True, download_name=filename)
+
+@app.route("/logout")
+def logout():
+    session.pop("user", None)
+    return redirect("/")
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
