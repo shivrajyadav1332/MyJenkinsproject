@@ -3,6 +3,7 @@ import boto3
 import sqlite3
 import os
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 from io import BytesIO
 
 app = Flask(__name__)
@@ -18,8 +19,9 @@ def init_db():
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        password TEXT
+        username TEXT UNIQUE,
+        password TEXT,
+        email TEXT
     )""")
     conn.commit()
     conn.close()
@@ -36,10 +38,11 @@ def home():
 def register():
     username = request.form["username"]
     password = request.form["password"]
+    email = request.form.get("email", "")
 
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
-    c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+    c.execute("INSERT INTO users (username, password, email) VALUES (?, ?, ?)", (username, generate_password_hash(password), email))
     conn.commit()
     conn.close()
     return redirect("/")
@@ -51,11 +54,11 @@ def login():
 
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+    c.execute("SELECT * FROM users WHERE username=?", (username,))
     user = c.fetchone()
     conn.close()
 
-    if user:
+    if user and check_password_hash(user[2], password):
         session["user"] = username
         return redirect("/dashboard")
     return "❌ Invalid Credentials"
@@ -85,6 +88,57 @@ def download(filename):
     s3.download_fileobj(S3_BUCKET, filename, file_stream)
     file_stream.seek(0)
     return send_file(file_stream, as_attachment=True, download_name=filename)
+
+@app.route("/profile")
+def profile():
+    if "user" not in session:
+        return redirect("/")
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT email FROM users WHERE username=?", (session["user"],))
+    row = c.fetchone()
+    conn.close()
+    email = row[0] if row and row[0] else ""
+    return render_template("profile.html", user=session["user"], email=email)
+
+@app.route("/update_profile", methods=["POST"])
+def update_profile():
+    if "user" not in session:
+        return redirect("/")
+    email = request.form.get("email", "")
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("UPDATE users SET email=? WHERE username=?", (email, session["user"]))
+    conn.commit()
+    conn.close()
+    return render_template("profile.html", user=session["user"], email=email, message="Profile updated successfully!")
+
+@app.route("/change_password", methods=["POST"])
+def change_password():
+    if "user" not in session:
+        return redirect("/")
+    current_password = request.form["current_password"]
+    new_password = request.form["new_password"]
+    confirm_password = request.form["confirm_password"]
+
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT password, email FROM users WHERE username=?", (session["user"],))
+    row = c.fetchone()
+
+    if not row or not check_password_hash(row[0], current_password):
+        conn.close()
+        return render_template("profile.html", user=session["user"], email="", message="Unable to change password. Please check your current password.", error=True)
+
+    if new_password != confirm_password:
+        conn.close()
+        return render_template("profile.html", user=session["user"], email=row[1] or "", message="New passwords do not match.", error=True)
+
+    c.execute("UPDATE users SET password=? WHERE username=?", (generate_password_hash(new_password), session["user"]))
+    conn.commit()
+    email = row[1] or ""
+    conn.close()
+    return render_template("profile.html", user=session["user"], email=email, message="Password changed successfully!")
 
 @app.route("/logout")
 def logout():
